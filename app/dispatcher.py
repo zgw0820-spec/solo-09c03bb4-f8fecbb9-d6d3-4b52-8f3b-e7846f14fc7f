@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from app import verification
 from app.cases import PRESETS_BY_ID, CaseDefinition
 from app.config import Settings
 from app.db import SeedManager
@@ -53,6 +54,10 @@ class Task:
     name: str
     kind: str
     expectation: str
+    # Self-test tasks reuse the refund pipeline with a crash-injection hook in
+    # the child; ``worker_case_id`` and ``target_orders`` are only set for them.
+    worker_case_id: str | None = None
+    target_orders: tuple[str, ...] = ()
     status: Status = "queued"
     submitted_at: float = field(default_factory=time.time)
     started_at: float | None = None
@@ -61,6 +66,7 @@ class Task:
     error: str | None = None
     restore: dict[str, Any] | None = None
     restore_error: str | None = None
+    verification: dict[str, Any] | None = None
     pid: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -78,6 +84,7 @@ class Task:
             "error": self.error,
             "restore": self.restore,
             "restore_error": self.restore_error,
+            "verification": self.verification,
             "pid": self.pid,
         }
 
@@ -152,6 +159,35 @@ class Dispatcher:
             self._prune_history_locked()
             self._cond.notify_all()
             return [t.to_dict() for t in created]
+
+    def submit_selftest(
+        self,
+        worker_case_id: str,
+        target_orders: list[str],
+        preset_id: str,
+        kind: str = "refund",
+    ) -> dict[str, Any]:
+        """Queue a crash-injection self-test through the real refund pipeline.
+
+        Not exposed through the HTTP API: the web presets stay fixed.  Used by
+        the automated tests and by operators running the Docker self-test.
+        """
+        with self._cond:
+            task = Task(
+                task_id=uuid.uuid4().hex,
+                preset_id=preset_id,
+                name=f"自检 · {worker_case_id}",
+                kind=kind,
+                expectation="success",
+                worker_case_id=worker_case_id,
+                target_orders=tuple(target_orders),
+            )
+            self._tasks[task.task_id] = task
+            self._order.append(task.task_id)
+            self._queue.append(task.task_id)
+            self._prune_history_locked()
+            self._cond.notify_all()
+            return task.to_dict()
 
     def arm_simulated_restore_failure(self, count: int = 1) -> int:
         with self._cond:
@@ -445,17 +481,50 @@ class Dispatcher:
         with self._cond:
             task = self._tasks[task_id]
             preset_id = task.preset_id
-        result = self._run_child(preset_id, task)
+            definition = PRESETS_BY_ID.get(preset_id)
+            if definition is not None:
+                target_orders = list(definition.target_orders)
+                worker_case_id = definition.preset_id
+            else:
+                target_orders = list(task.target_orders)
+                worker_case_id = task.worker_case_id or preset_id
+
+        # Arm the write journal *before* the child starts.  If arming fails the
+        # case is still executed (its business result is useful) but it can
+        # never pass, because its writes are unverified.
+        arm_error: str | None = None
+        try:
+            verification.arm(self.settings.db_path, task_id, preset_id, target_orders)
+        except Exception as exc:  # noqa: BLE001 - surfaced as an unverified result
+            arm_error = f"无法布设写入取证: {type(exc).__name__}: {exc}"
+        if arm_error is not None:
+            with self._cond:
+                task.verification = verification.unverified(
+                    task_id, preset_id, target_orders, arm_error
+                )
+
+        result = self._run_child(worker_case_id, task)
 
         with self._cond:
             task.result = result
             task.status = "restoring"
-            if not result.get("passed"):
-                task.error = result.get("message")
+            self._cond.notify_all()
+
+        # Evidence is captured after the child has fully exited and *always*
+        # before the restore below, so a crash after COMMIT is still provable.
+        report = self._verify_writes(task_id, preset_id, target_orders, arm_error)
+        result = verification.combine_result(result, report)
+        with self._cond:
+            task.verification = report
+            task.result = result
+            task.error = (
+                None if result["passed"] else result.get("message")
+            )
             self._cond.notify_all()
 
         # Restoration happens after the child has fully exited, regardless of
-        # whether the case passed, failed, crashed or timed out.
+        # whether the case passed, failed, crashed or timed out -- and also when
+        # verification is unverified or failed.
         restore_info: dict[str, Any] = {
             "ok": False,
             "started_at": time.time(),
@@ -485,6 +554,27 @@ class Dispatcher:
                 task.status = "done"
                 task.restore_error = None
             self._cond.notify_all()
+
+    def _verify_writes(
+        self,
+        task_id: str,
+        preset_id: str,
+        target_orders: list[str],
+        arm_error: str | None,
+    ) -> dict[str, Any]:
+        """Capture journaled writes; any failure leaves the case unverified."""
+        if arm_error is not None:
+            return verification.unverified(task_id, preset_id, target_orders, arm_error)
+        try:
+            captured = verification.capture(self.settings.db_path)
+            return verification.evaluate(captured, task_id, preset_id, target_orders)
+        except Exception as exc:  # noqa: BLE001 - never block the restore
+            return verification.unverified(
+                task_id,
+                preset_id,
+                target_orders,
+                f"取证失败: {type(exc).__name__}: {exc}",
+            )
 
     def _restore_database(self, simulate_allowed: bool) -> None:
         with self._cond:

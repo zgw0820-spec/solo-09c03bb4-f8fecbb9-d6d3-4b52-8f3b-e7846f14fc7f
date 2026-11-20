@@ -17,6 +17,10 @@ class CaseDefinition:
     description: str
     expectation: Expectation
     touches: str
+    # For refund cases: the only orders whose rows the case may write.  The
+    # dispatcher journals every change with triggers and rejects a case that
+    # writes any other order.
+    target_orders: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -62,6 +66,7 @@ PRESETS: tuple[CaseDefinition, ...] = (
         description="对 ORD-1001 退款 25.00 元，写入流水并把订单置为部分退款。",
         expectation="success",
         touches="写入 refund_requests、ledger_entries、orders",
+        target_orders=("ORD-1001",),
     ),
     CaseDefinition(
         preset_id="REF-002",
@@ -70,6 +75,7 @@ PRESETS: tuple[CaseDefinition, ...] = (
         description="对 ORD-1002 全额退款 42.00 元，订单置为已退款。",
         expectation="success",
         touches="写入 refund_requests、ledger_entries、orders",
+        target_orders=("ORD-1002",),
     ),
     CaseDefinition(
         preset_id="REF-003",
@@ -78,6 +84,7 @@ PRESETS: tuple[CaseDefinition, ...] = (
         description="对已全额退款的 ORD-1003 再次退款 10.00 元，预期业务拒绝并失败退出。",
         expectation="failure",
         touches="事务内校验，不写入",
+        target_orders=("ORD-1003",),
     ),
     CaseDefinition(
         preset_id="REF-004",
@@ -86,6 +93,7 @@ PRESETS: tuple[CaseDefinition, ...] = (
         description="对 ORD-1005（19.99 元）退款 25.00 元，预期业务拒绝并失败退出。",
         expectation="failure",
         touches="事务内校验，不写入",
+        target_orders=("ORD-1005",),
     ),
     CaseDefinition(
         preset_id="REF-005",
@@ -94,6 +102,19 @@ PRESETS: tuple[CaseDefinition, ...] = (
         description="对 ORD-1005 退款 5.00 元并提交，随后故意异常退出，用于验证失败用例也会恢复数据库。",
         expectation="success",
         touches="写入并提交后异常退出",
+        target_orders=("ORD-1005",),
+    ),
+    CaseDefinition(
+        preset_id="REF-006",
+        name="误写另一订单后改回并提交（核验演示）",
+        kind="refund",
+        description=(
+            "正常退款 ORD-1002，但在同一事务内把 ORD-1004 的退款申请误改为已退款后又改回原值并提交。"
+            "净效果为零，核验仍应判为误写。"
+        ),
+        expectation="success",
+        touches="写入 refund_requests、ledger_entries、orders（含 ORD-1004 的改回）",
+        target_orders=("ORD-1002",),
     ),
 )
 

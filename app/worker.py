@@ -18,16 +18,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 if __package__ in (None, ""):  # ``python app/worker.py`` support
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.cases import PRESETS_BY_ID  # noqa: E402
+from app.cases import PRESETS_BY_ID, CaseDefinition  # noqa: E402
 
 
 class CaseFailure(AssertionError):
@@ -169,7 +170,7 @@ def _refund(
         ).fetchone()
         if row is None:
             raise CaseFailure(f"订单不存在: {order_id}")
-        order_amount, status = row
+        order_amount, _ = row
         refunded = conn.execute(
             "SELECT COALESCE(SUM(-amount_cents), 0) FROM ledger_entries"
             " WHERE order_id = ? AND kind = 'refund'",
@@ -235,6 +236,46 @@ def refund_commit_then_crash(conn: sqlite3.Connection, hold_ms: int = 0) -> dict
     raise RuntimeError(f"用例在提交退款后故意异常退出: {json.dumps(result)}")
 
 
+def refund_stray_write_restored(conn: sqlite3.Connection, hold_ms: int = 0) -> dict:
+    """Positive demo: refund the target, *also* touch a different order and undo it.
+
+    The stray update is made inside the same transaction, reverted to the
+    original value and committed.  The net effect on the database is nil, so
+    only the write journal can tell that ORD-1004 was ever written.  The case
+    is expected to fail verification even though the refund itself succeeded.
+    """
+    target = _refund(conn, "ORD-1002", 4_200, "RR-T-1002D", hold_ms)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT state FROM refund_requests WHERE request_id = 'RR-2002'"
+        ).fetchone()
+        if row is None:
+            raise CaseFailure("演示用例缺少 ORD-1004 的退款申请 RR-2002")
+        original_state = row[0]
+        # Mistyped write: touches ORD-1004 instead of the target ORD-1002.
+        conn.execute(
+            "UPDATE refund_requests SET state = 'pending', created_at = ?"
+            " WHERE order_id = 'ORD-1004'",
+            (now,),
+        )
+        _hold(hold_ms)
+        # Put the row back exactly as it was, then commit.  A value comparison
+        # would call this a no-op; the journal still reports the write.
+        conn.execute(
+            "UPDATE refund_requests SET state = ?, created_at = '2026-01-05T15:50:00Z'"
+            " WHERE request_id = 'RR-2002'",
+            (original_state,),
+        )
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    return {**target, "stray_order_id": "ORD-1004", "stray_writes_reverted": True}
+
+
 EXECUTORS: dict[str, Callable[..., dict]] = {
     "AUD-001": audit_order_totals,
     "AUD-002": audit_refund_within_payment,
@@ -245,7 +286,80 @@ EXECUTORS: dict[str, Callable[..., dict]] = {
     "REF-003": refund_reject_duplicate,
     "REF-004": refund_reject_over_limit,
     "REF-005": refund_commit_then_crash,
+    "REF-006": refund_stray_write_restored,
 }
+
+# Self-test hooks.  They are deliberately *not* submit-able presets: they exist
+# so automated tests (and the manual Docker self-test described in the README)
+# can provoke a hard crash after a stray write.  Invoke them with
+# ``python -m app.worker --case SELFTEST-... --db ...``.
+SELFTEST_EXECUTORS: dict[str, Callable[..., dict]] = {
+    # Commit a write to a non-target order, then die via os._exit(3) so no
+    # worker report is printed.  The journal row survives the crash.
+    "SELFTEST-STRAY-COMMIT-CRASH": lambda conn, hold_ms=0: _stray_commit_hard_crash(conn),
+    # Start a transaction that writes a non-target order and die *before*
+    # COMMIT.  SQLite rolls it back on the next open, so it must not be counted.
+    "SELFTEST-STRAY-ROLLBACK-CRASH": lambda conn, hold_ms=0: _stray_rollback_hard_crash(conn),
+    # Commit a stray write and then a successful target refund, then die.
+    "SELFTEST-STRAY-RESTORED-COMMIT-CRASH": lambda conn, hold_ms=0: _stray_restored_hard_crash(conn),
+    # Write a non-target order, roll it back, then return normally.  The worker
+    # passes and the rolled-back write must not be counted.
+    "SELFTEST-STRAY-ROLLBACK-SUCCESS": lambda conn, hold_ms=0: _stray_rollback_then_pass(conn),
+}
+
+
+def _stray_commit_hard_crash(conn: sqlite3.Connection) -> dict:
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute(
+        "UPDATE orders SET status = 'partial_refund' WHERE order_id = 'ORD-1004'"
+    )
+    conn.execute("COMMIT")
+    os._exit(3)  # hard crash: no report, no cleanup
+
+
+def _stray_rollback_hard_crash(conn: sqlite3.Connection) -> dict:
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute(
+        "UPDATE orders SET status = 'partial_refund' WHERE order_id = 'ORD-1004'"
+    )
+    os._exit(3)  # die mid-transaction; SQLite must roll this back on next open
+
+
+def _stray_restored_hard_crash(conn: sqlite3.Connection, hold_ms: int = 0) -> dict:
+    refund_stray_write_restored(conn, hold_ms)
+    os._exit(3)  # committed stray writes, then a hard crash
+
+
+def _stray_rollback_then_pass(conn: sqlite3.Connection) -> dict:
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute(
+        "UPDATE orders SET status = 'partial_refund' WHERE order_id = 'ORD-1004'"
+    )
+    conn.execute("ROLLBACK")
+    # Give the case a real (target-order) write as well, so it is a normal pass.
+    return refund_partial(conn)
+
+
+def _executor(case_id: str) -> Callable[..., dict] | None:
+    return EXECUTORS.get(case_id) or SELFTEST_EXECUTORS.get(case_id)
+
+
+# Minimal definitions so ``run_case`` accepts the self-test ids as write cases.
+_SELFTEST_DEFINITIONS: dict[str, CaseDefinition] = {
+    case_id: CaseDefinition(
+        preset_id=case_id,
+        name="自检：误写后硬崩溃",
+        kind="refund",
+        description="仅用于自动化/人工自检，不通过网页预置列表暴露。",
+        expectation="success",
+        touches="写入非目标订单后 os._exit",
+    )
+    for case_id in SELFTEST_EXECUTORS
+}
+
+
+def _definition(case_id: str) -> CaseDefinition | None:
+    return PRESETS_BY_ID.get(case_id) or _SELFTEST_DEFINITIONS.get(case_id)
 
 
 def run_case(
@@ -256,7 +370,7 @@ def run_case(
     ``hold_ms`` keeps the child alive (inside the refund transaction for write
     presets) so tests can observe concurrency and exclusivity deterministically.
     """
-    definition = PRESETS_BY_ID.get(case_id)
+    definition = _definition(case_id)
     if definition is None:
         return False, f"未知预置用例: {case_id}", {}
 
@@ -269,7 +383,7 @@ def run_case(
             # accidentally writes fails instead of corrupting the shared DB.
             conn.execute("PRAGMA query_only = ON")
         conn.execute("SELECT 1 FROM orders LIMIT 1").fetchall()
-        details = EXECUTORS[case_id](conn, hold_ms=hold_ms)
+        details = _executor(case_id)(conn, hold_ms=hold_ms)
         elapsed = int((time.monotonic() - started) * 1000)
         details["elapsed_ms"] = elapsed
         if definition.expectation == "failure":

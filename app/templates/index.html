@@ -40,6 +40,10 @@
   .badge.done { color: var(--ok); border-color: #1f6b4d; }
   .badge.failed { color: var(--err); border-color: #7a2f2f; }
   .badge.blocked_restore { color: var(--err); border-color: #7a2f2f; background: #2a1313; }
+  .badge.verify-ok { color: var(--ok); border-color: #1f6b4d; }
+  .badge.verify-bad { color: var(--err); border-color: #7a2f2f; background: #2a1313; }
+  .badge.verify-unknown { color: var(--warn); border-color: #7a5a12; }
+  .muted { color: var(--muted); }
   button { background: #1d2c48; color: var(--text); border: 1px solid var(--line);
     border-radius: 7px; padding: 6px 12px; cursor: pointer; font: inherit; }
   button:hover:not(:disabled) { border-color: var(--accent); }
@@ -85,7 +89,7 @@
 <body>
 <header>
   <h1>门店结算测试调度台</h1>
-  <span class="sub">共用 SQLite 测试库 · 每用例独立进程 · 退款独占并在进程退出后恢复</span>
+  <span class="sub">共用 SQLite 测试库 · 每用例独立进程 · 退款独占并在进程退出后恢复 · 退款写入按目标订单核验</span>
 </header>
 
 <main>
@@ -126,7 +130,11 @@
       </div>
       <div class="hint">
         派发严格按提交顺序：队首是退款时，核账不能越过；退款需等待运行中的核账全部结束。
-        恢复失败时暂停派发，队列保留，可随时继续提交。
+        恢复失败时暂停派发，队列保留，可随时继续提交。<br>
+        退款用例在启动前布设写入取证：进程退出后、恢复数据库前，按目标订单核对
+        orders、ledger_entries、refund_requests 的新增/更新/删除（更新同时看新旧订单号）。
+        提交到非目标订单即判失败（即使同事务改回原值）；回滚的写入不计。取证失败记为未核验，
+        用例不能通过，但数据库仍会恢复。
       </div>
     </section>
   </div>
@@ -141,12 +149,13 @@
             <th style="width:92px">用例</th>
             <th style="width:96px">状态</th>
             <th>结果 / 错误</th>
+            <th style="width:150px">误写核验</th>
             <th style="width:78px">耗时</th>
             <th style="width:70px">进程</th>
           </tr>
         </thead>
         <tbody id="task-body">
-          <tr><td colspan="6" class="empty">暂无提交。选择左侧预置用例开始。</td></tr>
+          <tr><td colspan="7" class="empty">暂无提交。选择左侧预置用例开始。</td></tr>
         </tbody>
       </table>
     </div>
@@ -161,6 +170,7 @@ const STATUS_TEXT = {
   done: "已完成", blocked_restore: "等待恢复重试",
 };
 const KIND_TEXT = { audit: "核账", refund: "退款" };
+const OP_TEXT = { insert: "新增", update: "更新", delete: "删除" };
 let lastState = null;
 let toastTimer = null;
 
@@ -239,6 +249,41 @@ function escapeHTML(s) {
   })[c]);
 }
 
+function verificationCell(task) {
+  const v = task.verification;
+  if (task.kind !== "refund") {
+    return `<span class="restore-line">不适用（只读核账）</span>`;
+  }
+  if (!v) {
+    return `<span class="restore-line">${task.status === "running" ? "等待取证…" : "-"}</span>`;
+  }
+  if (v.status === "passed") {
+    return `<span class="badge verify-ok">核验通过</span>
+      <div class="restore-line">目标订单 ${escapeHTML((v.target_orders || []).join("、") || "-")}</div>
+      <div class="restore-line">共 ${v.write_count ?? 0} 条写入</div>`;
+  }
+  if (v.status === "failed") {
+    const tables = (v.violating_tables || []).join("、");
+    const orders = (v.violating_order_ids || []).join("、");
+    const rows = (v.violations || []).map((item) => {
+      const key = item.row_key ?? "-";
+      const from = item.old_order_id ?? "∅";
+      const to = item.new_order_id ?? "∅";
+      const move = from === to ? "" : ` <span class="muted">(${escapeHTML(from)} → ${escapeHTML(to)})</span>`;
+      return `<div>${escapeHTML(item.table)} · ${OP_TEXT[item.operation] || item.operation}` +
+        ` · 订单 ${escapeHTML((item.order_ids || []).join("、"))}` +
+        ` · 行 ${escapeHTML(String(key))}${move}</div>`;
+    }).join("");
+    return `<span class="badge verify-bad">核验失败 · 误写</span>
+      <div class="restore-line err">误写表：${escapeHTML(tables || "-")}</div>
+      <div class="restore-line err">非目标订单：${escapeHTML(orders || "-")}</div>
+      <details><summary>逐条写入（${v.violations.length}）</summary><pre>${rows}</pre></details>`;
+  }
+  return `<span class="badge verify-unknown">未核验</span>
+    <div class="restore-line err">${escapeHTML(v.error || "无法取证")}</div>
+    <div class="restore-line">用例不能通过；仍会恢复数据库</div>`;
+}
+
 function render(state) {
   lastState = state;
   $("kpi-queued").textContent = state.counts.queued;
@@ -286,6 +331,7 @@ function render(state) {
       <td>${escapeHTML(task.preset_id)}<br><span class="restore-line">${escapeHTML(task.name)}</span></td>
       <td>${statusBadge(task)}<br><span class="restore-line">${KIND_TEXT[task.kind] || task.kind}${task.expectation === "failure" ? " · 预期失败" : ""}</span></td>
       <td>${resultCell(task)}</td>
+      <td>${verificationCell(task)}</td>
       <td class="num">${fmtDuration(task.duration_ms)}</td>
       <td class="num">${pid}</td>
     </tr>`;

@@ -29,5 +29,23 @@ services:
       retries: 3
       start_period: 10s
 
+  # One-shot self-check of the refund write verification.  Not started by
+  # `docker compose up`; run explicitly with:
+  #   docker compose run --rm verification-selfcheck
+  verification-selfcheck:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: settlement-test-dispatcher:local
+    profiles: ["selfcheck"]
+    command: ["python", "-m", "app.selfcheck"]
+    environment:
+      PYTHONPATH: /srv/app
+    tmpfs:
+      - /tmp
+    read_only: true
+    network_mode: none
+    restart: "no"
+
 volumes:
   settlement-data:

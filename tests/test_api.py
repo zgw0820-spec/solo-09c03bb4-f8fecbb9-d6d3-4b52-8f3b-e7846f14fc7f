@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import main
-from app.config import Settings, load_settings
+from app.config import Settings
 from app.dispatcher import Dispatcher
 
 
@@ -45,7 +45,7 @@ def test_index_and_presets_render(client):
     assert "REF-001" in page.text
 
     presets = test_client.get("/api/presets").json()["presets"]
-    assert len(presets) == 9
+    assert len(presets) == 10
     kinds = {p["kind"] for p in presets}
     assert kinds == {"audit", "refund"}
 
@@ -64,6 +64,28 @@ def test_submit_runs_case_and_reports_result(client):
     assert task["result"]["passed"] is True
     assert task["restore"]["ok"] is True
     assert task["pid"]
+
+
+def test_demo_preset_reports_mistyped_writes_over_http(client):
+    test_client, _ = client
+    response = test_client.post("/api/cases", json={"preset_id": "REF-006", "copies": 1})
+    assert response.status_code == 202
+    task_id = response.json()["accepted"][0]["task_id"]
+
+    state = _wait(
+        test_client,
+        lambda s: any(t["task_id"] == task_id and t["status"] == "done" for t in s["tasks"]),
+    )
+    task = next(t for t in state["tasks"] if t["task_id"] == task_id)
+    assert task["result"]["worker_passed"] is True
+    assert task["result"]["passed"] is False
+    assert task["verification"]["status"] == "failed"
+    assert task["verification"]["violating_tables"] == ["refund_requests"]
+    assert task["verification"]["violating_order_ids"] == ["ORD-1004"]
+    assert task["restore"]["ok"] is True
+    # The page exposes the verification column and per-case target orders.
+    for preset in test_client.get("/api/presets").json()["presets"]:
+        assert "target_orders" in preset
 
 
 def test_unknown_preset_returns_404(client):
