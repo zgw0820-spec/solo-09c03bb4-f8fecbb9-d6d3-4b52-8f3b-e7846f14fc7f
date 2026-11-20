@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>门店结算测试调度台</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #16213a; --line: #24334f; --text: #e6edf7;
+    --muted: #93a4c0; --accent: #4ea1ff; --ok: #35c48b; --warn: #f0b429;
+    --err: #f26d6d; --run: #58b6ff; --restore: #b98bff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  header { padding: 18px 24px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 18px; margin: 0; letter-spacing: .02em; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  main { padding: 20px 24px 60px; max-width: 1280px; margin: 0 auto;
+    display: grid; grid-template-columns: 380px 1fr; gap: 20px; align-items: start; }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px; }
+  h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
+  .preset { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+    margin-bottom: 10px; }
+  .preset .top { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+  .preset .name { font-weight: 600; }
+  .preset .desc { color: var(--muted); font-size: 12px; margin: 4px 0 6px; }
+  .preset .meta { display: flex; gap: 8px; align-items: center; }
+  .preset .touches { color: #7f92b3; font-size: 11px; flex: 1; }
+  .badge { font-size: 11px; padding: 1px 7px; border-radius: 99px; border: 1px solid; white-space: nowrap; }
+  .badge.audit { color: var(--accent); border-color: #2c5c8f; }
+  .badge.refund { color: var(--warn); border-color: #7a5a12; }
+  .badge.queued { color: var(--muted); border-color: var(--line); }
+  .badge.running { color: var(--run); border-color: #245c85; }
+  .badge.restoring { color: var(--restore); border-color: #5a3e85; }
+  .badge.done { color: var(--ok); border-color: #1f6b4d; }
+  .badge.failed { color: var(--err); border-color: #7a2f2f; }
+  .badge.blocked_restore { color: var(--err); border-color: #7a2f2f; background: #2a1313; }
+  button { background: #1d2c48; color: var(--text); border: 1px solid var(--line);
+    border-radius: 7px; padding: 6px 12px; cursor: pointer; font: inherit; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: #1d3f68; border-color: #2f6ba8; }
+  button.danger { background: #3a1e22; border-color: #7a3038; color: #ffb4b4; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input[type=number] { width: 62px; background: #0e1830; color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font: inherit; }
+  .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 10px; margin-bottom: 14px; }
+  .kpi { background: #101a2e; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .kpi .k { color: var(--muted); font-size: 11px; }
+  .kpi .v { font-size: 19px; font-weight: 650; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .banner { border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; font-size: 13px;
+    display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+  .banner.hidden { display: none; }
+  .banner.err { background: #2a1414; border: 1px solid #6d2c2c; color: #ffc3c3; }
+  .banner.info { background: #12233a; border: 1px solid #24466d; color: #b9d8ff; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line);
+    vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .06em; }
+  td.num { font-variant-numeric: tabular-nums; color: var(--muted); }
+  .msg { max-width: 420px; word-break: break-word; }
+  .msg.err { color: #ff9d9d; }
+  .restore-line { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+  .restore-line.err { color: #ff9d9d; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 11.5px; }
+  pre { white-space: pre-wrap; word-break: break-word; background: #0b1424;
+    border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-size: 11px;
+    max-height: 220px; overflow: auto; margin: 6px 0 0; }
+  .empty { color: var(--muted); padding: 18px 4px; font-size: 13px; }
+  .hint { color: var(--muted); font-size: 11.5px; margin-top: 10px; }
+  #toast { position: fixed; right: 20px; bottom: 20px; background: #1b2a45;
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px;
+    max-width: 380px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #toast.show { opacity: 1; }
+  .scroll { max-height: 70vh; overflow: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>门店结算测试调度台</h1>
+  <span class="sub">共用 SQLite 测试库 · 每用例独立进程 · 退款独占并在进程退出后恢复</span>
+</header>
+
+<main>
+  <div>
+    <section style="margin-bottom:20px">
+      <h2>调度状态</h2>
+      <div class="status-grid">
+        <div class="kpi"><div class="k">排队中</div><div class="v" id="kpi-queued">-</div></div>
+        <div class="kpi"><div class="k">运行中核账</div><div class="v" id="kpi-audits">-</div></div>
+        <div class="kpi"><div class="k">通过</div><div class="v" id="kpi-passed" style="color:var(--ok)">-</div></div>
+        <div class="kpi"><div class="k">失败</div><div class="v" id="kpi-failed" style="color:var(--err)">-</div></div>
+      </div>
+      <div id="banner" class="banner hidden"></div>
+      <div class="row">
+        <button id="btn-retry" disabled>重试恢复并续跑</button>
+        <button id="btn-simulate" class="danger">模拟下次恢复失败</button>
+      </div>
+      <div class="hint" id="db-hint">数据库状态读取中…</div>
+    </section>
+
+    <section>
+      <h2>预置用例</h2>
+      <div id="presets">
+        {% for p in presets %}
+        <div class="preset" data-preset="{{ p.preset_id }}">
+          <div class="top">
+            <span class="name">{{ p.preset_id }} · {{ p.name }}</span>
+            <span class="badge {{ p.kind }}">{{ "核账" if p.kind == "audit" else "退款" }}</span>
+          </div>
+          <div class="desc">{{ p.description }}</div>
+          <div class="meta">
+            <span class="touches">{{ p.touches }}</span>
+            <input type="number" min="1" max="20" value="1" aria-label="份数">
+            <button class="submit" data-preset="{{ p.preset_id }}">提交</button>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      <div class="hint">
+        派发严格按提交顺序：队首是退款时，核账不能越过；退款需等待运行中的核账全部结束。
+        恢复失败时暂停派发，队列保留，可随时继续提交。
+      </div>
+    </section>
+  </div>
+
+  <section>
+    <h2>用例队列与结果</h2>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:52px">序号</th>
+            <th style="width:92px">用例</th>
+            <th style="width:96px">状态</th>
+            <th>结果 / 错误</th>
+            <th style="width:78px">耗时</th>
+            <th style="width:70px">进程</th>
+          </tr>
+        </thead>
+        <tbody id="task-body">
+          <tr><td colspan="6" class="empty">暂无提交。选择左侧预置用例开始。</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<div id="toast"></div>
+<script>
+const $ = (id) => document.getElementById(id);
+const STATUS_TEXT = {
+  queued: "排队中", running: "运行中", restoring: "恢复数据库",
+  done: "已完成", blocked_restore: "等待恢复重试",
+};
+const KIND_TEXT = { audit: "核账", refund: "退款" };
+let lastState = null;
+let toastTimer = null;
+
+function toast(msg, bad = false) {
+  const el = $("toast");
+  el.textContent = msg;
+  el.style.borderColor = bad ? "#7a3038" : "#2f6ba8";
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 3600);
+}
+
+async function postJSON(url, body) {
+  const options = { method: "POST", headers: {} };
+  if (body !== undefined) {
+    options.headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
+  }
+  const res = await fetch(url, options);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+  return data;
+}
+
+function fmtDuration(ms) {
+  if (ms === null || ms === undefined) return "-";
+  return ms >= 1000 ? (ms / 1000).toFixed(2) + "s" : ms + "ms";
+}
+
+function statusBadge(task) {
+  let cls = task.status;
+  if (task.status === "done" && task.result && !task.result.passed) cls = "failed";
+  let label = STATUS_TEXT[task.status] || task.status;
+  if (task.status === "done" && task.result) label = task.result.passed ? "通过" : "失败";
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+
+function resultCell(task) {
+  const parts = [];
+  if (task.status === "queued" && task.queue_position) {
+    parts.push(`<span class="restore-line">队列第 ${task.queue_position} 位</span>`);
+  }
+  if (task.status === "running") {
+    parts.push(`<span class="restore-line">进程已启动（PID ${task.result ? task.result.pid ?? "-" : "-"}）</span>`);
+  }
+  if (task.status === "restoring") {
+    parts.push(`<span class="restore-line">用例进程已退出，正在恢复数据库…</span>`);
+  }
+  if (task.result) {
+    const cls = task.result.passed ? "" : "err";
+    parts.push(`<div class="msg ${cls}">${escapeHTML(task.result.message || "")}</div>`);
+    if (task.result.details && Object.keys(task.result.details).length) {
+      parts.push(`<details><summary>详情</summary><pre>${escapeHTML(JSON.stringify(task.result.details, null, 2))}</pre></details>`);
+    }
+  }
+  if (task.error && !(task.result && task.result.message)) {
+    parts.push(`<div class="msg err">${escapeHTML(task.error)}</div>`);
+  }
+  if (task.restore) {
+    const r = task.restore;
+    if (r.ok) {
+      parts.push(`<div class="restore-line">数据库已恢复（第 ${r.attempts ?? 1} 次）</div>`);
+    } else {
+      parts.push(`<div class="restore-line err">恢复失败（第 ${r.attempts ?? 1} 次）${r.simulated ? "：模拟故障" : ""}</div>`);
+    }
+  }
+  if (task.restore_error) {
+    parts.push(`<div class="restore-line err">${escapeHTML(task.restore_error)}</div>`);
+  }
+  return parts.join("") || `<span class="restore-line">-</span>`;
+}
+
+function escapeHTML(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[c]);
+}
+
+function render(state) {
+  lastState = state;
+  $("kpi-queued").textContent = state.counts.queued;
+  $("kpi-audits").textContent = `${state.running_audits}/${state.max_audit_concurrency}`;
+  $("kpi-passed").textContent = state.counts.passed;
+  $("kpi-failed").textContent = state.counts.failed;
+
+  const banner = $("banner");
+  if (state.retrying_restore) {
+    banner.className = "banner info";
+    banner.innerHTML = `<span>正在重试恢复数据库…队列保持不动。</span>`;
+    banner.classList.remove("hidden");
+  } else if (state.paused) {
+    banner.className = "banner err";
+    banner.innerHTML = `<span>${escapeHTML(state.pause_reason || "派发已暂停")}<br>
+      <small>队列已保留：新的用例仍会被接收，但不会开始执行。</small></span>`;
+    banner.classList.remove("hidden");
+  } else {
+    banner.classList.add("hidden");
+  }
+  $("btn-retry").disabled = !(state.paused && state.blocked_task_id) || state.retrying_restore;
+
+  const simBtn = $("btn-simulate");
+  simBtn.textContent = state.simulated_restore_failures > 0
+    ? `模拟恢复失败（已装填 ${state.simulated_restore_failures} 次）`
+    : "模拟下次恢复失败";
+
+  const db = state.db || {};
+  $("db-hint").textContent = db.ok
+    ? `测试库 integrity=${db.integrity} · 订单 ${db.orders} · 流水 ${db.ledger_entries} · 退款申请 ${db.refund_requests}`
+      + (db.matches_seed === false ? " · ⚠ 当前内容与起始状态不一致" : " · 与起始状态一致")
+    : `测试库读取失败：${db.error || "未知错误"}`;
+  $("db-hint").style.color = db.ok && db.matches_seed === false ? "var(--err)" : "var(--muted)";
+
+  const body = $("task-body");
+  if (!state.tasks.length) {
+    body.innerHTML = `<tr><td colspan="6" class="empty">暂无提交。选择左侧预置用例开始。</td></tr>`;
+    return;
+  }
+  const ordered = [...state.tasks].reverse();
+  body.innerHTML = ordered.map((task, idx) => {
+    const pid = task.result && task.result.pid ? task.result.pid : (task.pid ?? "-");
+    return `<tr>
+      <td class="num">${state.tasks.length - idx}</td>
+      <td>${escapeHTML(task.preset_id)}<br><span class="restore-line">${escapeHTML(task.name)}</span></td>
+      <td>${statusBadge(task)}<br><span class="restore-line">${KIND_TEXT[task.kind] || task.kind}${task.expectation === "failure" ? " · 预期失败" : ""}</span></td>
+      <td>${resultCell(task)}</td>
+      <td class="num">${fmtDuration(task.duration_ms)}</td>
+      <td class="num">${pid}</td>
+    </tr>`;
+  }).join("");
+}
+
+async function poll() {
+  try {
+    const res = await fetch("/api/state", { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    render(await res.json());
+  } catch (err) {
+    $("db-hint").textContent = `无法读取调度状态：${err.message}`;
+  } finally {
+    setTimeout(poll, 900);
+  }
+}
+
+document.addEventListener("click", async (event) => {
+  const btn = event.target.closest("button.submit");
+  if (btn) {
+    const wrap = btn.closest(".preset");
+    const copies = parseInt(wrap.querySelector("input[type=number]").value || "1", 10);
+    btn.disabled = true;
+    try {
+      const data = await postJSON("/api/cases", { preset_id: btn.dataset.preset, copies });
+      toast(`已接收 ${data.accepted.length} 项（${btn.dataset.preset}）`);
+    } catch (err) {
+      toast(`提交失败：${err.message}`, true);
+    } finally {
+      btn.disabled = false;
+      poll();
+    }
+  }
+});
+
+$("btn-retry").addEventListener("click", async () => {
+  try {
+    await postJSON("/api/restore/retry");
+    toast("已开始重试恢复");
+  } catch (err) {
+    toast(`重试失败：${err.message}`, true);
+  }
+  setTimeout(poll, 300);
+});
+
+$("btn-simulate").addEventListener("click", async () => {
+  try {
+    const data = await postJSON("/api/restore/simulate-failure", { count: 1 });
+    toast(`已装填 ${data.armed_failures} 次模拟恢复失败，将在下一次退款用例恢复时生效`);
+  } catch (err) {
+    toast(`操作失败：${err.message}`, true);
+  }
+  setTimeout(poll, 300);
+});
+
+poll();
+</script>
+</body>
+</html>

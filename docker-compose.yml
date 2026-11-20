@@ -1,0 +1,33 @@
+services:
+  settlement-dispatcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: settlement-test-dispatcher:local
+    container_name: settlement-test-dispatcher
+    ports:
+      - "${SETTLE_PORT:-8000}:8000"
+    environment:
+      SETTLE_DATA_DIR: /data
+      SETTLE_DB_PATH: /data/settlement.db
+      SETTLE_SNAPSHOT_PATH: /data/settlement.seed.db
+      SETTLE_MAX_AUDIT: "${SETTLE_MAX_AUDIT:-2}"
+      SETTLE_CHILD_TIMEOUT: "${SETTLE_CHILD_TIMEOUT:-30}"
+      SETTLE_MAX_QUEUE: "${SETTLE_MAX_QUEUE:-200}"
+      SETTLE_LOG_LEVEL: info
+    volumes:
+      - settlement-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).status == 200 else 1)
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  settlement-data:
